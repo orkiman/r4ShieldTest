@@ -1,8 +1,9 @@
 #include <Arduino.h>
 
 // --- Pinout Configuration (Please adjust to your hardware) ---
-const int GUN_PWM_PIN = 9;      // PWM pin to control the gun driver
-const int CURRENT_SENSE_PIN = A0; // Analog pin for current measurement
+// this mapping is for the error connected boards version
+const int GUN_PWM_PIN = 11;      // PWM pin to control the gun driver
+const int CURRENT_SENSE_PIN = A5; // Analog pin for current measurement
 
 // --- Conversion Constants (Calibrate these for your sensor) ---
 // This assumes a sensor where output voltage is proportional to current.
@@ -42,6 +43,13 @@ void setup() {
   while (!Serial) { 
     ; // Wait for serial port to connect.
   }
+
+  // must have for glue controller board!!!
+  pinMode(8, OUTPUT); digitalWrite(8,LOW);
+  pinMode(9, OUTPUT); digitalWrite(9,LOW);
+  pinMode(10, OUTPUT); digitalWrite(10,LOW);
+  pinMode(11, OUTPUT); digitalWrite(11,LOW);
+
 
   pinMode(GUN_PWM_PIN, OUTPUT);
   analogWrite(GUN_PWM_PIN, 0); // Ensure gun is off
