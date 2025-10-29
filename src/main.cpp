@@ -3,7 +3,7 @@
 // --- Pinout Configuration (Please adjust to your hardware) ---
 // this mapping is for the error connected boards version
 const int GUN_PWM_PIN = 11;      // PWM pin to control the gun driver
-const int CURRENT_SENSE_PIN = A5; // Analog pin for current measurement
+const int CURRENT_SENSE_PIN = A2; // Analog pin for current measurement
 
 // --- Conversion Constants (Calibrate these for your sensor) ---
 // This assumes a sensor where output voltage is proportional to current.
@@ -99,6 +99,12 @@ void parseSerialCommand(String cmd) {
     Serial.println(F("CMD: Running dots."));
     is_running_dots = true;
     next_dot_time_ms = millis(); // Start immediately
+  } else if (cmd == "100") {
+    Serial.println(F("10 OFF."));
+    digitalWrite(10,LOW);
+  } else if (cmd == "101") {
+    Serial.println(F("10 ON."));
+    digitalWrite(10,HIGH);
   } else if (cmd == "s") {
     Serial.println(F("CMD: Stopping."));
     is_running_dots = false;
@@ -196,6 +202,21 @@ void updateGun() {
 }
 
 int readCurrent() {
+  // Convert ADC reading to current (mA) using sensor with 2.5V offset and 0.8 V/A sensitivity
+  const float VREF = 5.0f;            // UNO R4 default analog reference
+  const float ADC_MAX = 4095.0f;      // 12-bit ADC
+  const float SENSOR_ZERO_V = 2.5f;   // 0 A corresponds to 2.5 V
+  const float SENS_V_PER_A = 0.8f;    // 0.8 V per Amp
+
   int adc_value = analogRead(CURRENT_SENSE_PIN);
-  return (int)(adc_value * ADC_TO_MA);
+  float v = (adc_value * VREF) / ADC_MAX;             // Volts
+  float current_a = (v - SENSOR_ZERO_V) / SENS_V_PER_A; // Amps
+  float current_ma = current_a * 1000.0f;               // mA
+
+  // Small deadband to reduce jitter around 0 A
+  if (current_ma > -20.0f && current_ma < 20.0f) {
+    current_ma = 0.0f;
+  }
+
+  return (int)current_ma;
 }
