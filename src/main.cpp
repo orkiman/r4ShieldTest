@@ -159,7 +159,7 @@ void updateGun() {
   if (micros() - dot_start_time_us > dot_size_us) {
     gun_state = IDLE;
     analogWrite(GUN_PWM_PIN, 0);
-    //Serial.println(F("Debug: Dot timed out."));
+    Serial.println(F("Debug: Dot timed out."));
     return;
   }
 
