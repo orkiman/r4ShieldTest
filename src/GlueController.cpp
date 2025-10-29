@@ -7,6 +7,14 @@
 #include <vector>
 #include <algorithm>
 
+#if !defined(GLUE_WEAK)
+#  if defined(__GNUC__)
+#    define GLUE_WEAK __attribute__((weak))
+#  else
+#    define GLUE_WEAK
+#  endif
+#endif
+
 // ===== Globals =====
 ControllerConfig config;
 
@@ -18,10 +26,11 @@ struct GunConfigInternal {
 static GunConfigInternal _guns_internal[4];
 GunConfig guns[4]; // placeholder if other code references it
 
-volatile uint32_t encoderCount = 0; // raw (wraps)
-static uint32_t lastEncoderRaw = 0; // for delta
-int64_t positionAccum = 0;          // monotonic
-int64_t currentPosition64 = 0;      // snapshot used in loop
+// התאמת טיפוסים לכותרת (GlueController.h):
+volatile long encoderCount = 0;     // raw (wraps) — תואם extern volatile long
+static uint32_t lastEncoderRaw = 0;  // for delta
+int64_t positionAccum = 0;           // monotonic
+int64_t currentPosition64 = 0;       // snapshot used in loop
 
 int pageLength = 0;
 bool isCalibrating = false;
@@ -33,7 +42,7 @@ String inputBuffer = "";
 
 bool gunStates[4] = {false,false,false,false};
 bool allFiringZonesInserted = false;
-int64_t firingBasePosition = 0;
+int firingBasePosition = 0;          // תואם extern int
 
 int  currentThreshold = 0; // 0..ADC_MAX
 
@@ -81,33 +90,60 @@ static void initFastADC_AVR() {
 static inline int getCurrentRaw(uint8_t gun) { return (int)gunCurrentADC10[gun]; } // 0..1023
 
 #else
-// ===== R4 (Renesas) timer-driven sampler (12-bit) =====
+// ===== R4 (Renesas RA4M1) sampler (12-bit) =====
 volatile uint16_t gunCurrentADC12[4] = {2048,2048,2048,2048};
 
+  // ---- מסלול טיימר חומרתי במהירות גבוהה (מומלץ על UNO R4) ----
   #if (USE_R4_HWTIMER==1) && (defined(ARDUINO_UNOR4_MINIMA) || defined(ARDUINO_UNOR4_WIFI))
-    #include <HardwareTimer.h>
-    static HardwareTimer *adcTimer = nullptr;
+    #include <FspTimer.h>
+    static FspTimer adcTimer;
     static volatile uint8_t adcChanIdx = 0;
-    static void adcTimerISR() {
+
+    // ISR קצר: דגימה לערוץ הנוכחי והתקדמות לערוץ הבא (0..3)
+    static void adcTimerISR(timer_callback_args_t *) {
       uint8_t ch = adcChanIdx;
-      gunCurrentADC12[ch] = analogRead(OUTPUT_CURRENT_PINS[ch]); // ~10-15us typical
+      gunCurrentADC12[ch] = analogRead(OUTPUT_CURRENT_PINS[ch]); // ~10–15µs טיפוסי
       adcChanIdx = (uint8_t)((adcChanIdx + 1) & 0x03);
     }
+
     void startADCSampler(uint32_t totalSampleRateHz) {
+      if (totalSampleRateHz < 4000) totalSampleRateHz = 4000; // הגנה מינימלית
+
+      // הגדרות ADC
       analogReadResolution(12);
       #ifdef analogReadAveraging
         analogReadAveraging(1);
       #endif
-      adcTimer = new HardwareTimer(0); // adjust index if needed by your core
-      adcTimer->setOverflow(totalSampleRateHz, HERTZ); // one sample per tick (rotates channels)
-      adcTimer->attachInterrupt(adcTimerISR);
-      adcTimer->resume();
+
+      // מציאת ערוץ GPT פנוי (או שימוש בכפייה אם אין)
+      uint8_t timer_type = GPT_TIMER;
+      int8_t tindex = FspTimer::get_available_timer(timer_type);
+      if (tindex < 0) {
+        tindex = FspTimer::get_available_timer(timer_type, /*allowPWMReserved=*/true);
+        FspTimer::force_use_of_pwm_reserved_timer();
+      }
+
+      // אתחול הטיימר במצב תקופתי בתדר הדגימה הכולל (דגימה אחת לטיק)
+      bool ok = adcTimer.begin(
+        TIMER_MODE_PERIODIC,      // מצב תקופתי
+        timer_type,               // GPT
+        tindex,                   // אינדקס הערוץ
+        (float)totalSampleRateHz, // תדר Hz
+        0.0f,                     // duty (לא רלוונטי למצב זה)
+        adcTimerISR               // ISR
+      );
+      if (!ok) return;
+
+      if (!adcTimer.setup_overflow_irq()) return; // לאפשר IRQ גלישה/מחזור
+      if (!adcTimer.open()) return;
+      adcTimer.start();
     }
+
+  // ---- מסלול soft-tick שאינו תלוי טיימר חומרתי (fallback) ----
   #else
-    // Soft high-rate scheduler using micros() (non-blocking for updateGuns)
     static volatile uint8_t adcChanIdx = 0;
     static uint32_t adcNextTick = 0;
-    static uint32_t adcTickPeriodUs = 40; // ~25 kS/s total by default
+    static uint32_t adcTickPeriodUs = 40; // ~25 kS/s total כברירת-מחדל
 
     static inline void adcSoftTick() {
       uint32_t now = micros();
@@ -118,6 +154,7 @@ volatile uint16_t gunCurrentADC12[4] = {2048,2048,2048,2048};
         adcChanIdx = (uint8_t)((adcChanIdx + 1) & 0x03);
       }
     }
+
     void startADCSampler(uint32_t totalSampleRateHz) {
       analogReadResolution(12);
       #ifdef analogReadAveraging
@@ -132,6 +169,7 @@ volatile uint16_t gunCurrentADC12[4] = {2048,2048,2048,2048};
 static inline int getCurrentRaw(uint8_t gun) { return (int)gunCurrentADC12[gun]; } // 0..4095
 #endif
 // ----- end ADC backends -----
+
 
 // ===== Ring helpers =====
 static inline bool ring_push(ZoneRing &r, const ActiveZone &z){
@@ -153,8 +191,11 @@ static inline ActiveZone& ring_peek(ZoneRing &r, uint8_t idxFromHead){
 // ===== ISR =====
 void encoderISR(){ encoderCount++; }
 
+// ===== Forward decl for IO helper used earlier =====
+static inline void setGun(uint8_t idx, bool on);
+
 // ===== Setup / Loop =====
-void setup() {
+void GLUE_WEAK setup() {
   Serial.begin(115200);
 
   pinMode(ENCODER_PIN_A, INPUT_PULLUP);
@@ -178,7 +219,7 @@ void setup() {
   lastSensorState = digitalRead(SENSOR_PIN);
 }
 
-void loop() {
+void GLUE_WEAK loop() {
 #if !defined(__AVR__)
   // soft-timer path needs ticking; hwtimer path doesn't
   #if !((USE_R4_HWTIMER==1) && (defined(ARDUINO_UNOR4_MINIMA) || defined(ARDUINO_UNOR4_WIFI)))
@@ -187,7 +228,7 @@ void loop() {
 #endif
 
   // ===== Wrap-safe encoder to 64-bit monotonic =====
-  noInterrupts(); uint32_t raw = encoderCount; interrupts();
+  noInterrupts(); uint32_t raw = (uint32_t)encoderCount; interrupts();
   uint32_t delta = raw - lastEncoderRaw;   // unsigned handles wrap
   lastEncoderRaw = raw;
   positionAccum += (int64_t)delta;
@@ -307,7 +348,7 @@ void initCalibration(const JsonObject &json){
 void handleCalibrationSensorStateChange(bool sensorState){
   if (sensorState == LOW) { noInterrupts(); encoderCount = 0; interrupts(); lastEncoderRaw = 0; positionAccum = 0; }
   else {
-    uint32_t raw; noInterrupts(); raw = encoderCount; interrupts();
+    uint32_t raw; noInterrupts(); raw = (uint32_t)encoderCount; interrupts();
     uint32_t delta = raw - lastEncoderRaw;
     lastEncoderRaw = raw;
     positionAccum += (int64_t)delta;
@@ -374,8 +415,8 @@ void checkSensor(){
       handleCalibrationSensorStateChange(st);
     } else if (config.enabled) {
       if (st == LOW) {
-        firingBasePosition = currentPosition64;   // 64-bit base
-        allFiringZonesInserted = false;           // append next idle
+        firingBasePosition = (int)currentPosition64;   // בסיס 32-ביט תואם כותרת
+        allFiringZonesInserted = false;                 // append next idle
       }
     }
     lastSensorState = st;
@@ -389,8 +430,8 @@ void calculateFiringZones(){
     if (!g.enabled) continue;
     for (const GlueRow &row : g.rows){
       ActiveZone z;
-      z.from  = firingBasePosition + (int64_t)row.from;
-      z.to    = firingBasePosition + (int64_t)row.to;
+      z.from  = (int64_t)firingBasePosition + (int64_t)row.from;
+      z.to    = (int64_t)firingBasePosition + (int64_t)row.to;
       z.space = row.space;
       z.next  = z.from;  // first drop at 'from'
       ring_push(firingZones[i], z); // drop silently if ring full
